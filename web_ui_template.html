@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign Controller</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    background: #14161a; color: #e8e8ea;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 18px; background: #1c1f26; border-bottom: 1px solid #2a2e37;
+    position: sticky; top: 0; z-index: 10;
+  }
+  header h1 { font-size: 18px; margin: 0; }
+  #status { font-size: 13px; padding: 4px 10px; border-radius: 999px; }
+  #status.ok { background: #1e3d2a; color: #6fdd8f; }
+  #status.bad { background: #3d1e1e; color: #dd6f6f; }
+  #status { background: #2a2e37; color: #9aa0ab; } /* neutral default, e.g. "BLE off" */
+  nav { display: flex; gap: 2px; background: #1c1f26; padding: 0 12px; }
+  nav button {
+    flex: 1; padding: 12px 8px; background: none; border: none; color: #9aa0ab;
+    font-size: 14px; cursor: pointer; border-bottom: 2px solid transparent;
+  }
+  nav button.active { color: #fff; border-bottom-color: #4a8fe0; }
+  main { padding: 16px; max-width: 720px; margin: 0 auto; }
+  section.tab { display: none; }
+  section.tab.active { display: block; }
+  h2 { font-size: 15px; color: #9aa0ab; text-transform: uppercase; letter-spacing: .04em;
+       margin: 22px 0 10px; }
+  h2:first-child { margin-top: 0; }
+  .card { background: #1c1f26; border: 1px solid #2a2e37; border-radius: 10px; padding: 14px; margin-bottom: 12px; }
+  .btn-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; }
+  button.action {
+    padding: 12px 10px; background: #262b35; color: #e8e8ea; border: 1px solid #333a47;
+    border-radius: 8px; font-size: 14px; cursor: pointer;
+  }
+  button.action:hover { background: #303645; }
+  button.action:active { background: #3a4152; }
+  /* Send-to-Display slot buttons: one per row, big and thumb-friendly --
+     these are meant to be tapped by feel/glance while getting in the car,
+     not squeezed into a dense multi-column grid. */
+  .slot-list { display: flex; flex-direction: column; gap: 10px; }
+  button.slot-btn {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 18px; background: #262b35; color: #e8e8ea; border: 1px solid #333a47;
+    border-radius: 10px; font-size: 20px; font-weight: 600; cursor: pointer; text-align: left;
+  }
+  button.slot-btn:hover { background: #303645; }
+  button.slot-btn:active { background: #3a4152; }
+  button.slot-btn .slot-num {
+    display: inline-block; min-width: 28px; color: #6f9fdd; font-weight: 700;
+  }
+  .slot-thumb {
+    display: inline-block; width: 64px; height: 16px; flex: 0 0 auto; background: #000;
+    border-radius: 3px; image-rendering: pixelated; border: 1px solid #333a47;
+  }
+  button.slot-btn .slot-label { flex: 1 1 auto; }
+  #nowShowingThumb { width: 96px; height: 24px; }
+  #nowShowingLabel { font-size: 16px; font-weight: 600; }
+  button.primary { background: #2a5a95; border-color: #3a70b5; }
+  button.primary:hover { background: #326aab; }
+  button.danger { background: #6b2a2a; border-color: #8a3a3a; }
+  .row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+  input[type=range] { flex: 1; }
+  input[type=color] { width: 48px; height: 36px; border: none; border-radius: 6px; padding: 0; background: none; }
+  input[type=text], textarea, select {
+    width: 100%; background: #14161a; color: #e8e8ea; border: 1px solid #333a47;
+    border-radius: 6px; padding: 8px 10px; font-family: ui-monospace, monospace; font-size: 13px;
+  }
+  textarea { min-height: 90px; resize: vertical; }
+  #lastSent { font-size: 13px; color: #9aa0ab; }
+  .feedback-ok { font-size: 13px; color: #6fdd8f; }
+  .feedback-error { font-size: 13px; color: #dd6f6f; }
+  #rawResult { white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 12px;
+               background: #14161a; border: 1px solid #2a2e37; border-radius: 6px; padding: 10px;
+               min-height: 40px; margin-top: 8px; color: #9aa0ab; }
+  .example-status { font-size: 11px; padding: 1px 6px; border-radius: 4px; margin-left: 6px; }
+  .docs { line-height: 1.55; font-size: 14px; }
+  .docs h1 { font-size: 22px; }
+  .docs h2 { font-size: 18px; color: #e8e8ea; text-transform: none; letter-spacing: 0; border-bottom: 1px solid #2a2e37; padding-bottom: 6px; margin-top: 28px; }
+  .docs h3 { font-size: 15px; color: #cfd3da; }
+  .docs h4 { font-size: 14px; color: #b0b6c0; }
+  .docs code { background: #262b35; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  .docs pre { background: #14161a; border: 1px solid #2a2e37; border-radius: 6px; padding: 10px; overflow-x: auto; }
+  .docs pre code { background: none; padding: 0; }
+  .docs table.md-table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 12.5px; }
+  .docs table.md-table th, .docs table.md-table td { border: 1px solid #2a2e37; padding: 5px 8px; text-align: left; }
+  .docs table.md-table th { background: #1c1f26; }
+  .docs a { color: #6fa8e0; }
+  .docs .docs-note { color: #9aa0ab; font-size: 12.5px; }
+  .docs hr { border: none; border-top: 1px solid #2a2e37; margin: 20px 0; }
+  footer { text-align: center; padding: 24px 0; color: #565c68; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Sign Controller</h1>
+  <span id="status" class="bad">checking...</span>
+</header>
+
+<nav>
+  <button class="tab-btn active" data-tab="control">Control</button>
+  <button class="tab-btn" data-tab="raw">Raw Send</button>
+  <button class="tab-btn" data-tab="docs">Docs</button>
+</nav>
+
+<main>
+
+  <section id="tab-control" class="tab active">
+    <h2>Bluetooth Connection</h2>
+    <div class="card">
+      <!-- 2026-07-25: BLE no longer auto-starts at boot (WiFi-only boot,
+           opt-in BLE) -- this is the trigger. connectBleStatus text and the
+           button's own label are both driven by refreshStatus() below. -->
+      <button id="connectBleBtn" class="action primary" style="width:100%; padding:16px; font-size:18px;" onclick="connectBle()">Connect to Sign</button>
+      <div id="connectBleStatus" style="margin-top:8px; font-size:13px; color:#9aa0ab">BLE is off.</div>
+    </div>
+
+    <h2>Now Showing</h2>
+    <div class="card">
+      <div id="nowShowing" class="row" style="margin:0">
+        <span id="nowShowingThumb" class="slot-thumb"></span>
+        <span id="nowShowingLabel">--</span>
+      </div>
+    </div>
+
+    <h2>Send to Display</h2>
+    <div class="card">
+      <div id="slots" class="slot-list"><i>loading slots...</i></div>
+      <div id="sendFeedback" style="margin-top:10px"></div>
+    </div>
+
+    <h2>Power &amp; Brightness</h2>
+    <div class="card">
+      <div class="btn-grid">
+        <button class="action primary" onclick="power(true)">Power ON</button>
+        <button class="action danger" onclick="power(false)">Power OFF</button>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <span>Brightness</span>
+        <input type="range" id="brightSlider" min="0" max="255" value="255" oninput="document.getElementById('brightVal').textContent=this.value">
+        <span id="brightVal">255</span>
+        <button class="action" onclick="setBrightness()">Set</button>
+      </div>
+    </div>
+
+    <h2>Display</h2>
+    <div class="card">
+      <div class="btn-grid">
+        <button class="action" onclick="mirror(true)">Mirror ON</button>
+        <button class="action" onclick="mirror(false)">Mirror OFF</button>
+      </div>
+    </div>
+
+    <h2>Ambient Light</h2>
+    <div class="card">
+      <div class="row">
+        <input type="color" id="lightColor" value="#ff0000">
+        <button class="action" onclick="setLightColor()">Set Solid Color</button>
+        <button class="action" onclick="setLightCycle()">Animated Cycle</button>
+      </div>
+    </div>
+
+    <h2>Decorative</h2>
+    <div class="card">
+      <div class="btn-grid">
+        <button class="action" onclick="sendExampleByLabel('Rainbow border (Frame, whole panel)')">Rainbow Border</button>
+      </div>
+      <div class="docs-note" style="margin-top:8px">Draws a decorative animated border around
+        whatever's already on screen -- same effect the app calls "Frame".</div>
+    </div>
+
+    <h2>Status</h2>
+    <div class="card">
+      <div id="lastSent">Last sent: --</div>
+      <div id="deviceStatus" style="margin-top:6px">--</div>
+    </div>
+  </section>
+
+  <section id="tab-raw" class="tab">
+    <h2>Examples</h2>
+    <div class="card">
+      <select id="exampleSelect" onchange="loadExample()"><option value="">-- pick an example --</option></select>
+    </div>
+
+    <h2>Raw Hex (one packet per line, already-framed envelope bytes)</h2>
+    <div class="card">
+      <textarea id="rawHex" placeholder="010002060501020503"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button class="action primary" onclick="sendRaw()">Send</button>
+        <button class="action" onclick="document.getElementById('rawHex').value=''">Clear</button>
+      </div>
+      <div id="rawResult"></div>
+    </div>
+  </section>
+
+  <section id="tab-docs" class="tab">
+    <div class="card" id="docsContainer">__DOCS_HTML__</div>
+  </section>
+
+</main>
+
+<footer>CoolLEDUX sign controller &middot; ESP32-S3 &middot; reverse-engineered protocol</footer>
+
+<script>
+const EXAMPLES = __EXAMPLES_JSON__;
+const PREVIEWS = __PREVIEWS_JSON__;
+
+function $(id) { return document.getElementById(id); }
+
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('section.tab').forEach(s => s.classList.remove('active'));
+    btn.classList.add('active');
+    $('tab-' + btn.dataset.tab).classList.add('active');
+  });
+});
+
+async function apiPost(path, params) {
+  const url = params ? path + '?' + new URLSearchParams(params).toString() : path;
+  const r = await fetch(url, { method: 'POST' });
+  const text = await r.text();
+  return { ok: r.ok, status: r.status, text: text };
+}
+
+function showFeedback(msg, isError) {
+  const el = $('sendFeedback');
+  if (!el) return;
+  el.textContent = msg;
+  el.className = isError ? 'feedback-error' : 'feedback-ok';
+}
+
+function setNowShowing(code, label) {
+  $('nowShowingLabel').textContent = label;
+  const thumb = $('nowShowingThumb');
+  if (code && PREVIEWS[code]) {
+    thumb.outerHTML = '<img id="nowShowingThumb" class="slot-thumb" src="'
+      + PREVIEWS[code] + '" alt="">';
+  } else if (thumb.tagName === 'IMG') {
+    thumb.outerHTML = '<span id="nowShowingThumb" class="slot-thumb"></span>';
+  }
+}
+
+async function refreshStatus() {
+  try {
+    const r = await fetch('/api/status');
+    const j = await r.json();
+    const badge = $('status');
+    if (!j.bleEnabled) {
+      badge.textContent = 'BLE off';
+      badge.className = '';
+    } else {
+      badge.textContent = j.connected ? 'BLE connected' : 'BLE disconnected';
+      badge.className = j.connected ? 'ok' : 'bad';
+    }
+    const btn = $('connectBleBtn');
+    const st = $('connectBleStatus');
+    if (!j.bleEnabled) {
+      btn.textContent = 'Connect to Sign';
+      st.textContent = 'BLE is off -- tap to turn it on and connect.';
+    } else if (j.connected) {
+      btn.textContent = 'Reconnect to Sign';
+      st.textContent = 'Connected.';
+    } else {
+      btn.textContent = 'Reconnect to Sign';
+      st.textContent = 'BLE is on but not connected yet -- retrying automatically, or tap to retry now.';
+    }
+    $('lastSent').textContent = 'Last sent: ' + j.lastSent;
+    setNowShowing(j.lastSentCode, j.lastSent);
+    $('deviceStatus').textContent =
+      'SD: ' + (j.sdAvailable ? 'OK' : 'not available') +
+      ' | uptime: ' + j.uptimeSec + 's' +
+      ' | free heap: ' + j.freeHeap + 'B';
+  } catch (e) {
+    $('status').textContent = 'unreachable';
+    $('status').className = 'bad';
+  }
+}
+
+async function connectBle() {
+  const btn = $('connectBleBtn');
+  const st = $('connectBleStatus');
+  btn.disabled = true;
+  st.textContent = 'Connecting... (this can take a few seconds)';
+  try {
+    await apiPost('/api/connectble');
+  } catch (e) {
+    // fall through -- refreshStatus() below will show the real state either way
+  }
+  btn.disabled = false;
+  refreshStatus();
+}
+
+async function loadSlots() {
+  // /api/slots only returns slots that actually have content available right
+  // now (SD file exists, or it's a flash-fallback code) -- so every button
+  // shown here should really work. See hasContentFor() in the firmware.
+  try {
+    const r = await fetch('/api/slots');
+    const slots = await r.json();
+    const div = $('slots');
+    div.innerHTML = '';
+    slots.forEach(s => {
+      const b = document.createElement('button');
+      b.className = 'slot-btn';
+      const thumb = PREVIEWS[s.code]
+        ? '<img class="slot-thumb" src="' + PREVIEWS[s.code] + '" alt="">'
+        : '<span class="slot-thumb"></span>';
+      b.innerHTML = '<span class="slot-num">' + s.slot + '</span>' + thumb
+                  + '<span class="slot-label">' + s.label + '</span>';
+      b.onclick = () => sendSlot(s.code, s.label);
+      div.appendChild(b);
+    });
+    if (slots.length === 0) {
+      div.innerHTML = '<i>No messages available right now -- SD card missing/empty '
+                     + 'and nothing in the flash fallback. Wire up the SD card, or '
+                     + 'add codes to FALLBACK_CODES in bake_messages_coolledux.py.</i>';
+    }
+  } catch (e) {
+    $('slots').innerHTML = '<i>failed to load slots</i>';
+  }
+}
+
+async function sendSlot(code, label) {
+  // Update immediately on click rather than waiting for the HTTP round trip --
+  // /api/send doesn't respond until the ESP32 has finished streaming every
+  // BLE chunk (seconds for a short message, over a minute for a big
+  // animation), so waiting for that response before updating "Now Showing"
+  // would make the UI look unresponsive the whole time it's sending.
+  setNowShowing(code, label + ' (sending...)');
+  showFeedback('Sending: ' + label + '...', false);
+  const res = await apiPost('/api/send', { code: code });
+  if (res.ok) {
+    showFeedback('Sent: ' + label, false);
+  } else {
+    // Real failure -- e.g. no SD card and this code isn't in the flash
+    // fallback table. Show the server's actual reason, don't pretend it worked,
+    // and revert the optimistic "Now Showing" update since nothing was sent.
+    showFeedback((label || code) + ': ' + res.text, true);
+  }
+  refreshStatus();
+}
+
+async function power(on) {
+  await apiPost('/api/power', { on: on ? 1 : 0 });
+  setTimeout(refreshStatus, 300);
+}
+
+async function setBrightness() {
+  await apiPost('/api/brightness', { level: $('brightSlider').value });
+  setTimeout(refreshStatus, 300);
+}
+
+async function mirror(on) {
+  await apiPost('/api/mirror', { on: on ? 1 : 0 });
+  setTimeout(refreshStatus, 300);
+}
+
+async function setLightColor() {
+  const hex = $('lightColor').value.replace('#', '');
+  await apiPost('/api/light', { hex: hex });
+  setTimeout(refreshStatus, 300);
+}
+
+async function setLightCycle() {
+  await sendExampleByLabel('Animated color-cycle');
+}
+
+async function sendExampleByLabel(labelSubstring) {
+  const ex = EXAMPLES.find(e => e.label.includes(labelSubstring));
+  if (ex) await sendRawHex(ex.hex);
+  setTimeout(refreshStatus, 300);
+}
+
+function loadExample() {
+  const idx = $('exampleSelect').value;
+  if (idx === '') return;
+  $('rawHex').value = EXAMPLES[idx].hex;
+}
+
+function populateExamples() {
+  const sel = $('exampleSelect');
+  let lastCategory = '';
+  EXAMPLES.forEach((ex, i) => {
+    if (ex.category !== lastCategory) {
+      const og = document.createElement('optgroup');
+      og.label = ex.category;
+      og.id = 'og-' + ex.category;
+      sel.appendChild(og);
+      lastCategory = ex.category;
+    }
+    const opt = document.createElement('option');
+    opt.value = i;
+    opt.textContent = ex.label + '  [' + ex.status + ']';
+    document.getElementById('og-' + ex.category).appendChild(opt);
+  });
+}
+
+async function sendRawHex(hex) {
+  const r = await fetch('/api/raw', { method: 'POST', body: hex });
+  const text = await r.text();
+  $('rawResult').textContent = text;
+  return text;
+}
+
+async function sendRaw() {
+  const hex = $('rawHex').value.trim();
+  if (!hex) return;
+  $('rawResult').textContent = 'sending...';
+  await sendRawHex(hex);
+  setTimeout(refreshStatus, 300);
+}
+
+populateExamples();
+loadSlots();
+refreshStatus();
+setInterval(refreshStatus, 4000);
+</script>
+
+</body>
+</html>

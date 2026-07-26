@@ -1,0 +1,4 @@
+# Protocol/BLE logic lives in coolledux-ble; this project just supplies the
+# car-specific message content, SD-card export, and ESP32 firmware around it.
+# Not yet on PyPI -- install straight from the repo.
+coolledux-ble @ git+https://github.com/CharlesLennon/coolledux-ble.git
