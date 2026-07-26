@@ -641,9 +641,9 @@ the background (`WiFi.setAutoReconnect(true)`) if it ever drops out of range
 | Route | Method | Params | Does |
 |---|---|---|---|
 | `/` | GET | — | The web control panel itself (Control/Raw Send/Docs tabs), served from flash |
-| `/api/status` | GET | — | JSON: `connected`, `sdAvailable`, `lastSent`, `uptimeSec`, `freeHeap`, `connectAttempts`, `disconnects`, `wifiStaConnected`, `wifiStaIP` |
-| `/api/slots` | GET | `all` (optional, `1`) | JSON array of `{slot, code, label, available}`. By default only returns slots with content actually available right now (SD file exists, or it's a flash-fallback code) — pass `?all=1` to see every slot including unavailable ones |
-| `/api/send` | POST | `code` | `trySendCode(code)` — same funnel the knob and Serial interface use. Returns `200 ok` only if content was actually found and sent; `409` with the real reason (e.g. no SD card and this code isn't in the flash fallback) otherwise — **do not assume 200 from earlier — this used to always say "ok" even on a silent no-op, fixed 2026-07-25** |
+| `/api/status` | GET | — | JSON: `connected`, `lastSent`, `uptimeSec`, `freeHeap`, `connectAttempts`, `disconnects`, `wifiStaConnected`, `wifiStaIP` |
+| `/api/slots` | GET | `all` (optional, `1`) | JSON array of `{slot, code, label, available}`. By default only returns slots with content actually available right now (i.e. it's a flash-fallback code) — pass `?all=1` to see every slot including unavailable ones |
+| `/api/send` | POST | `code` | `trySendCode(code)` — same funnel the web UI and Serial interface use. Returns `200 ok` only if content was actually found and sent; `409` with the real reason (e.g. this code isn't in the flash fallback table) otherwise — **do not assume 200 from earlier — this used to always say "ok" even on a silent no-op, fixed 2026-07-25** |
 | `/api/power` | POST | `on` (0/1) | `sendPower()` |
 | `/api/brightness` | POST | `level` (0-255) | `sendBrightness()` |
 | `/api/mirror` | POST | `on` (0/1) | `sendMirror()` |

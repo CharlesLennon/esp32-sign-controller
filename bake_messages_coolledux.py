@@ -32,20 +32,17 @@ FontUtils via jadx decompilation:
      0x01 + [2-byte length + payload, with bytes 0x01-0x03 escaped as
      0x02 followed by (byte XOR 0x04)] + 0x03.
 
-Output (two things, since the SD-card rework):
-  1. ./sd_export/messages/*.json + ./sd_export/messages/slots.json -- copy the
-     "messages" FOLDER ITSELF onto the ROOT of a FAT32 SD card, so the card
-     ends up with /messages/BTN1.json, /messages/slots.json, etc. This is
-     where the full message/animation set lives now, so the ESP32's flash
-     usage stays small and constant no matter how many messages you add --
-     update messages by re-running this script and swapping files on the
-     card, no reflash needed. JSON (hex-encoded chunk bytes) instead of raw
-     binary specifically so the files are human-readable/diffable, and so
-     they could be served as-is by a future on-ESP32 web page (see the TODO
-     list in the project doc) without a translation step.
-  2. coolledx_fallback.h -- a MINIMAL flash-baked fallback (just BLANK + one
-     emergency message) copied into the ESP32 sketch folder as before, used
-     only if the SD card is missing/unreadable at boot.
+Output: coolledx_fallback.h -- every message/animation in FALLBACK_CODES,
+compiled directly into a C header and baked into flash. Copy it into the
+ESP32 sketch folder and reflash whenever you change message content.
+
+(An earlier iteration of this project read message content off an SD card
+at runtime, with this header only as an emergency fallback -- the firmware's
+LCD/rotary-encoder/beeper/SD-card subsystems were all removed 2026-07-25 in
+favor of WiFi web UI + Serial control only, so flash is now the sole content
+source and every message needs to be in FALLBACK_CODES to be reachable at
+all. Flash usage is comfortably within budget for this project's message
+set -- see FALLBACK_CODES's own comment for the real numbers.)
 
 ASSUMPTIONS worth knowing about (best-effort from decompiled/obfuscated code —
 first real-hardware test will confirm or reveal issues to tune):
@@ -331,9 +328,6 @@ SLOTS = [
     (11, "HI", "HI"),
 ]
 
-SD_EXPORT_DIR = "sd_export"      # local staging folder mirroring the SD card's root
-MESSAGES_DIR_NAME = "messages"   # subfolder on the card: /messages/BTN1.json, /messages/slots.json, ...
-SLOTS_MANIFEST_FILE = "slots.json"
 FALLBACK_HEADER_FILE = "coolledx_fallback.h"
 # Baked into flash as an emergency fallback if the SD card is missing/
 # unreadable at boot. Used to be kept deliberately tiny (just BLANK + one
@@ -784,69 +778,33 @@ def build_message_packets(text, hex_color, mode, speed, stay_time, index=0, coun
     return [announce] + data_packets
 
 
-# ==================== SD card export ====================
-
-def write_message_json(out_dir, code_name, packets, meta=None):
-    """Writes messages/<CODE>.json: {"code", ...meta (human-readable
-    definition)..., "num_chunks", "chunks": [hex, ...]}. `chunks` is what
-    actually gets sent -- same pre-built protocol bytes coolledx_bytes.h used
-    to bake into flash (and the earlier .BIN format wrote raw), just
-    hex-encoded as JSON text so the files are human-readable/diffable, and
-    could be served directly to a browser later (see the
-    phone-browser-control-page TODO) without a translation step. `meta` (see
-    main() -- `type`, `text`, `color`, and either text mode/speed/stayTime or
-    animation step/timing/`frames`) is purely descriptive: it documents WHY
-    the chunks look the way they do (what text, what color, what frame
-    sequence) without needing to hex-decode anything, but it's not read back
-    by the firmware -- only `chunks` is. The ESP32 still doesn't run any
-    LZSS/CRC/protocol logic itself -- it just hex-decodes and streams
-    `chunks`, exactly as it streamed raw .BIN bytes before."""
-    if len(packets) > 2000:
-        # Was capped at 255 (way more than any single-frame text/graffiti message
-        # should ever need -- a sanity net, not a protocol limit). Raised
-        # 2026-07-25 for the SNAKE game (a full-screen tiled multi-frame
-        # animation, confirmed working on real hardware at 656 chunks) --
-        # still a real sanity cap, just sized for legitimate large animations
-        # instead of only single frames.
-        raise ValueError(f"{code_name}: {len(packets)} chunks -- unexpectedly large, double check")
-    path = os.path.join(out_dir, f"{code_name}.json")
-    doc = {"code": code_name}
-    if meta:
-        doc.update(meta)
-    doc["num_chunks"] = len(packets)
-    doc["chunks"] = [chunk.hex() for chunk in packets]
-    with open(path, "w") as f:
-        json.dump(doc, f, indent=2)
-        f.write("\n")
-    total = sum(len(c) for c in packets)
-    json_size = os.path.getsize(path)
-    print(f"    -> {path} ({len(packets)} chunk(s), {total}B raw -> {json_size}B as JSON)")
-
-
-def write_slots_json(out_dir):
-    """messages/slots.json: one {"slot","code","label"} object per
-    Send-to-Display menu slot, read by the ESP32 at boot instead of a
-    hardcoded list. Reorder/rename/add slots by editing SLOTS above and
-    re-running this script -- no reflash."""
-    path = os.path.join(out_dir, SLOTS_MANIFEST_FILE)
-    doc = [{"slot": slot, "code": code, "label": label} for slot, code, label in SLOTS]
-    with open(path, "w") as f:
-        json.dump(doc, f, indent=2)
-        f.write("\n")
+# SD card export was removed 2026-07-25 -- the firmware no longer reads an
+# SD card at all (the LCD/rotary-encoder/beeper/SD subsystems were dropped
+# from esp32_sign_controller.ino the same day), so writing sd_export/
+# messages/*.json was pure dead output with nothing left to read it. Every
+# message is flash-baked via FALLBACK_CODES/write_fallback_header() below
+# instead -- see the module docstring's "Output" section.
+#
+# `all_meta` (built up throughout main() below) is now vestigial: it used to
+# feed write_message_json()'s human-readable `meta` field, but nothing
+# consumes it anymore. Left in place rather than stripped out (it's scattered
+# across a dozen call sites in main() and is harmless/inert), but it's safe
+# to remove entirely in a future pass if it gets in the way.
     print(f"    -> {path}")
 
 
 def write_fallback_header(all_entries, codes, output_file):
-    """Minimal flash-baked header -- same C struct shape as the old
-    coolledx_bytes.h, just restricted to `codes` (see FALLBACK_CODES) so it
-    stays tiny. Used by the firmware only if the SD card is missing/unreadable
-    at boot; renamed FALLBACK_TABLE (not MESSAGE_TABLE) to make that role
-    explicit in the .ino."""
+    """Flash-baked header -- same C struct shape as the old coolledx_bytes.h,
+    restricted to `codes` (see FALLBACK_CODES). Named FALLBACK_TABLE (not
+    MESSAGE_TABLE) for historical reasons (it used to be a true fallback used
+    only if the SD card was missing/unreadable) -- since the firmware's
+    SD-card support was removed 2026-07-25, this is now the ONLY source of
+    message content, so every message needs to be listed in FALLBACK_CODES
+    to be reachable at all."""
     lines = []
     lines.append("// Auto-generated by bake_messages_coolledux.py -- do not hand-edit.")
-    lines.append("// Minimal FLASH FALLBACK ONLY -- used if the SD card is missing/unreadable.")
-    lines.append("// The full message/animation set lives on the SD card: see the")
-    lines.append("// 'messages' folder (sd_export/messages/, incl. slots.json).")
+    lines.append("// Every message/animation in FALLBACK_CODES, flash-baked. This is the sole")
+    lines.append("// content source for the firmware (no SD card support since 2026-07-25).")
     lines.append("#pragma once")
     lines.append("#include <Arduino.h>")
     lines.append("")
@@ -886,11 +844,8 @@ def write_fallback_header(all_entries, codes, output_file):
 
 
 def main():
-    messages_dir = os.path.join(SD_EXPORT_DIR, MESSAGES_DIR_NAME)
-    os.makedirs(messages_dir, exist_ok=True)
-
-    all_entries = {}  # code_name -> packets (used for the JSON `chunks` and the flash fallback)
-    all_meta = {}      # code_name -> human-readable definition dict (see write_message_json())
+    all_entries = {}  # code_name -> packets (used for the flash fallback header)
+    all_meta = {}      # code_name -> human-readable definition dict (vestigial, see comment above)
 
     print("Building messages...")
     for code_name, text, color in MESSAGES:
@@ -1137,33 +1092,12 @@ def main():
         print(f"\nWARNING: SLOTS references code(s) with no MESSAGES/ANIMATIONS entry: {missing}"
               f" -- those slots will show '(not set)' on the sign until you add them.")
 
-    # Clean up stale .json files from a PREVIOUS run whose code no longer
-    # exists in this run's content (e.g. the old BTN1-BTN7 placeholder set,
-    # replaced 2026-07-25) -- the export step below only ever WRITES, so
-    # without this, removing/renaming a message would leave its old file
-    # behind forever, silently stale and never referenced by anything.
-    keep_names = {f"{code_name}.json" for code_name in all_entries} | {SLOTS_MANIFEST_FILE}
-    if os.path.isdir(messages_dir):
-        for fname in os.listdir(messages_dir):
-            if fname.endswith(".json") and fname not in keep_names:
-                stale_path = os.path.join(messages_dir, fname)
-                os.remove(stale_path)
-                print(f"    removed stale {stale_path} (no longer in MESSAGES/ANIMATIONS/etc.)")
-
-    print(f"\nWriting SD card export to ./{messages_dir}/ ...")
-    for code_name, packets in all_entries.items():
-        write_message_json(messages_dir, code_name, packets, all_meta.get(code_name))
-    write_slots_json(messages_dir)
-    print(f"\nCopy the '{MESSAGES_DIR_NAME}' FOLDER ITSELF (./{messages_dir}/) onto the ROOT of a "
-          f"FAT32 SD card -- the firmware looks for /{MESSAGES_DIR_NAME}/BTN1.json, "
-          f"/{MESSAGES_DIR_NAME}/slots.json, etc.")
-
     missing_fallback = [c for c in FALLBACK_CODES if c not in all_entries]
     if missing_fallback:
         raise SystemExit(f"FALLBACK_CODES references undefined code(s): {missing_fallback}")
 
     print(f"\nWriting flash fallback header {FALLBACK_HEADER_FILE} "
-          f"(only {', '.join(FALLBACK_CODES)} -- used only if the SD card is missing/unreadable)...")
+          f"({', '.join(FALLBACK_CODES)})...")
     write_fallback_header(all_entries, FALLBACK_CODES, FALLBACK_HEADER_FILE)
     print(f"Wrote {FALLBACK_HEADER_FILE} -- copy it into your ESP32 sketch folder.")
 

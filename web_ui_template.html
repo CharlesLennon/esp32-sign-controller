@@ -275,8 +275,7 @@ async function refreshStatus() {
     $('lastSent').textContent = 'Last sent: ' + j.lastSent;
     setNowShowing(j.lastSentCode, j.lastSent);
     $('deviceStatus').textContent =
-      'SD: ' + (j.sdAvailable ? 'OK' : 'not available') +
-      ' | uptime: ' + j.uptimeSec + 's' +
+      'uptime: ' + j.uptimeSec + 's' +
       ' | free heap: ' + j.freeHeap + 'B';
   } catch (e) {
     $('status').textContent = 'unreachable';
