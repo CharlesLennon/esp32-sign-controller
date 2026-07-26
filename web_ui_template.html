@@ -95,6 +95,32 @@
   .docs .docs-note { color: #9aa0ab; font-size: 12.5px; }
   .docs hr { border: none; border-top: 1px solid #2a2e37; margin: 20px 0; }
   footer { text-align: center; padding: 24px 0; color: #565c68; font-size: 12px; }
+
+  /* 2026-07-26: Create tab -- live drawing canvas + text composer, both
+     built on-device via the CoolLeduxBle library (see /api/draw, /api/compose
+     in the firmware), plus a browser-localStorage "Saved" gallery so custom
+     content survives a page reload without ever touching the ESP32's own
+     flash/SD (there is no SD card anymore, and flash is reserved for the
+     pre-baked FALLBACK_TABLE set) -- purely a client-side convenience. */
+  #drawCanvasWrap { background: #000; border-radius: 6px; overflow: hidden; line-height: 0; }
+  #drawCanvas { width: 100%; height: auto; display: block; image-rendering: pixelated; touch-action: none; cursor: crosshair; }
+  .draw-toolbar { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+  .draw-toolbar input[type=color] { width: 40px; height: 40px; }
+  button.icon-toggle { padding: 8px 14px; }
+  button.icon-toggle.active { background: #2a5a95; border-color: #3a70b5; }
+  .save-row { display: flex; gap: 8px; margin-top: 10px; }
+  .save-row input[type=text] { flex: 1; }
+  .save-row button { flex: 0 0 auto; }
+  .saved-grid { display: flex; flex-direction: column; gap: 8px; }
+  .saved-item { display: flex; align-items: center; gap: 10px; padding: 10px; background: #14161a;
+                border: 1px solid #2a2e37; border-radius: 8px; }
+  .saved-item .saved-thumb { width: 64px; height: 16px; flex: 0 0 auto; background: #000; border-radius: 3px;
+                              image-rendering: pixelated; border: 1px solid #333a47; }
+  .saved-item .saved-name { flex: 1 1 auto; font-size: 14px; font-weight: 600; overflow: hidden;
+                             text-overflow: ellipsis; white-space: nowrap; }
+  .saved-item .saved-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+  .saved-item .saved-actions button { padding: 6px 10px; font-size: 12px; }
+  #createFeedback { margin-top: 10px; }
 </style>
 </head>
 <body>
@@ -106,6 +132,7 @@
 
 <nav>
   <button class="tab-btn active" data-tab="control">Control</button>
+  <button class="tab-btn" data-tab="create">Create</button>
   <button class="tab-btn" data-tab="raw">Raw Send</button>
   <button class="tab-btn" data-tab="docs">Docs</button>
 </nav>
@@ -183,6 +210,60 @@
     </div>
   </section>
 
+  <section id="tab-create" class="tab">
+    <h2>Type &amp; Send</h2>
+    <div class="card">
+      <input type="text" id="composeText" placeholder="Type a message..." maxlength="80">
+      <div class="draw-toolbar">
+        <input type="color" id="composeColor" value="#00ff00">
+        <select id="composeStyle" style="width:auto; flex:1">
+          <option value="static">Static (fits on screen)</option>
+          <option value="scroll">Scrolling (long text)</option>
+        </select>
+        <label style="font-size:13px; display:flex; align-items:center; gap:6px">
+          <input type="checkbox" id="composeSmall" style="width:auto"> compact font
+        </label>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="action primary" onclick="sendCompose()">Send</button>
+      </div>
+      <div class="save-row">
+        <input type="text" id="composeSaveName" placeholder="Name to save as...">
+        <button class="action" onclick="saveCompose()">Save</button>
+      </div>
+      <div id="composeFeedback"></div>
+    </div>
+
+    <h2>Draw &amp; Send</h2>
+    <div class="card">
+      <div id="drawCanvasWrap">
+        <canvas id="drawCanvas" width="640" height="160"></canvas>
+      </div>
+      <div class="draw-toolbar">
+        <input type="color" id="drawColor" value="#ff0000">
+        <button class="action icon-toggle active" id="drawModeBtn" onclick="setDrawMode('draw')">Draw</button>
+        <button class="action icon-toggle" id="eraseModeBtn" onclick="setDrawMode('erase')">Erase</button>
+        <button class="action" onclick="clearDrawing()">Clear</button>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="action primary" onclick="sendDrawing()">Send</button>
+      </div>
+      <div class="save-row">
+        <input type="text" id="drawSaveName" placeholder="Name to save as...">
+        <button class="action" onclick="saveDrawing()">Save</button>
+      </div>
+      <div id="drawFeedback"></div>
+    </div>
+
+    <h2>Saved (this browser only)</h2>
+    <div class="card">
+      <div id="savedGrid" class="saved-grid"><i>Nothing saved yet -- use the Save buttons above.</i></div>
+      <div class="docs-note" style="margin-top:8px">Saved items live in this browser's local storage, not on
+        the sign controller itself -- they won't show up on a different phone/browser, and clearing this
+        browser's site data will remove them.</div>
+    </div>
+  </section>
+
   <section id="tab-raw" class="tab">
     <h2>Examples</h2>
     <div class="card">
@@ -230,8 +311,8 @@ async function apiPost(path, params) {
   return { ok: r.ok, status: r.status, text: text };
 }
 
-function showFeedback(msg, isError) {
-  const el = $('sendFeedback');
+function showFeedback(msg, isError, targetId) {
+  const el = $(targetId || 'sendFeedback');
   if (!el) return;
   el.textContent = msg;
   el.className = isError ? 'feedback-error' : 'feedback-ok';
@@ -417,9 +498,241 @@ async function sendRaw() {
   setTimeout(refreshStatus, 300);
 }
 
+// ==================== Create tab: Type & Send ====================
+// Builds a real message ON THE ESP32 itself, right now, via the
+// CoolLeduxBle C++ library (POST /api/compose) -- no pre-baking/reflashing
+// needed. See handleApiCompose() in the firmware.
+
+async function sendCompose() {
+  const text = $('composeText').value.trim();
+  if (!text) { showFeedback('Type something first.', true, 'composeFeedback'); return; }
+  const hex = $('composeColor').value.replace('#', '');
+  const style = $('composeStyle').value;
+  const small = $('composeSmall').checked ? '1' : '0';
+  showFeedback('Sending...', false, 'composeFeedback');
+  const res = await apiPost('/api/compose', { text: text, hex: hex, style: style, small: small });
+  if (res.ok) {
+    showFeedback('Sent: ' + text, false, 'composeFeedback');
+  } else {
+    showFeedback(res.text, true, 'composeFeedback');
+  }
+  setTimeout(refreshStatus, 300);
+}
+
+function saveCompose() {
+  const name = $('composeSaveName').value.trim();
+  const text = $('composeText').value.trim();
+  if (!name || !text) { showFeedback('Need both a name and some text to save.', true, 'composeFeedback'); return; }
+  addSavedItem({
+    type: 'text', name: name, text: text,
+    hex: $('composeColor').value, style: $('composeStyle').value,
+    small: $('composeSmall').checked
+  });
+  $('composeSaveName').value = '';
+  showFeedback('Saved "' + name + '".', false, 'composeFeedback');
+}
+
+// ==================== Create tab: Draw & Send ====================
+// A live pixel-drawing grid matching the sign's real 64x16 resolution.
+// `pixels` is row-major (index = y*DRAW_W+x), each entry either a "#RRGGBB"
+// string or null for background -- POSTed to /api/draw as JSON, which
+// matches exactly what handleApiDraw() in the firmware expects.
+
+const DRAW_W = 64, DRAW_H = 16;
+let drawPixels = new Array(DRAW_W * DRAW_H).fill(null);
+let drawMode = 'draw';
+let drawPointerDown = false;
+
+function setDrawMode(mode) {
+  drawMode = mode;
+  $('drawModeBtn').classList.toggle('active', mode === 'draw');
+  $('eraseModeBtn').classList.toggle('active', mode === 'erase');
+}
+
+function redrawCanvas(canvas, pixels) {
+  const ctx = canvas.getContext('2d');
+  const cw = canvas.width / DRAW_W, ch = canvas.height / DRAW_H;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  for (let y = 0; y < DRAW_H; y++) {
+    for (let x = 0; x < DRAW_W; x++) {
+      const c = pixels[y * DRAW_W + x];
+      if (c) {
+        ctx.fillStyle = c;
+        ctx.fillRect(x * cw, y * ch, cw, ch);
+      }
+    }
+  }
+}
+
+function cellFromEvent(canvas, evt) {
+  const rect = canvas.getBoundingClientRect();
+  const px = (evt.clientX - rect.left) / rect.width;
+  const py = (evt.clientY - rect.top) / rect.height;
+  const x = Math.min(DRAW_W - 1, Math.max(0, Math.floor(px * DRAW_W)));
+  const y = Math.min(DRAW_H - 1, Math.max(0, Math.floor(py * DRAW_H)));
+  return { x, y };
+}
+
+function paintAt(x, y) {
+  drawPixels[y * DRAW_W + x] = (drawMode === 'erase') ? null : $('drawColor').value;
+  redrawCanvas($('drawCanvas'), drawPixels);
+}
+
+function initDrawCanvas() {
+  const canvas = $('drawCanvas');
+  redrawCanvas(canvas, drawPixels);
+  canvas.addEventListener('pointerdown', (e) => {
+    drawPointerDown = true;
+    const { x, y } = cellFromEvent(canvas, e);
+    paintAt(x, y);
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!drawPointerDown) return;
+    const { x, y } = cellFromEvent(canvas, e);
+    paintAt(x, y);
+  });
+  window.addEventListener('pointerup', () => { drawPointerDown = false; });
+  canvas.addEventListener('pointerleave', () => { /* keep drawing state; pointerup on window handles release */ });
+}
+
+function clearDrawing() {
+  drawPixels.fill(null);
+  redrawCanvas($('drawCanvas'), drawPixels);
+}
+
+async function sendDrawing() {
+  showFeedback('Sending...', false, 'drawFeedback');
+  const r = await fetch('/api/draw', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ width: DRAW_W, height: DRAW_H, pixels: drawPixels.map(p => p || '') })
+  });
+  const text = await r.text();
+  if (r.ok) {
+    showFeedback('Sent drawing.', false, 'drawFeedback');
+  } else {
+    showFeedback(text, true, 'drawFeedback');
+  }
+  setTimeout(refreshStatus, 300);
+}
+
+function saveDrawing() {
+  const name = $('drawSaveName').value.trim();
+  if (!name) { showFeedback('Name it first.', true, 'drawFeedback'); return; }
+  addSavedItem({ type: 'drawing', name: name, width: DRAW_W, height: DRAW_H, pixels: drawPixels.slice() });
+  $('drawSaveName').value = '';
+  showFeedback('Saved "' + name + '".', false, 'drawFeedback');
+}
+
+// ==================== Saved gallery (browser localStorage only) ====================
+// Deliberately NOT sent to or stored on the ESP32 -- there's no SD card
+// anymore and flash is reserved for the pre-baked FALLBACK_TABLE set, so
+// "save" here just means "remember in this browser" (localStorage),
+// good enough for a quick personal library of custom messages/drawings
+// without spending any of the sign controller's own storage.
+const SAVED_KEY = 'signControllerSavedItems';
+
+function getSavedItems() {
+  try { return JSON.parse(localStorage.getItem(SAVED_KEY) || '[]'); }
+  catch (e) { return []; }
+}
+
+function setSavedItems(items) {
+  localStorage.setItem(SAVED_KEY, JSON.stringify(items));
+}
+
+function addSavedItem(item) {
+  const items = getSavedItems();
+  items.push(item);
+  setSavedItems(items);
+  renderSavedGrid();
+}
+
+function deleteSavedItem(idx) {
+  const items = getSavedItems();
+  items.splice(idx, 1);
+  setSavedItems(items);
+  renderSavedGrid();
+}
+
+function loadSavedItem(idx) {
+  const item = getSavedItems()[idx];
+  if (!item) return;
+  if (item.type === 'text') {
+    $('composeText').value = item.text;
+    $('composeColor').value = item.hex;
+    $('composeStyle').value = item.style;
+    $('composeSmall').checked = !!item.small;
+    showFeedback('Loaded "' + item.name + '" into Type & Send above.', false, 'composeFeedback');
+  } else {
+    drawPixels = item.pixels.slice();
+    redrawCanvas($('drawCanvas'), drawPixels);
+    showFeedback('Loaded "' + item.name + '" into Draw & Send above.', false, 'drawFeedback');
+  }
+}
+
+async function sendSavedItem(idx) {
+  const item = getSavedItems()[idx];
+  if (!item) return;
+  if (item.type === 'text') {
+    const res = await apiPost('/api/compose', {
+      text: item.text, hex: item.hex.replace('#', ''), style: item.style, small: item.small ? '1' : '0'
+    });
+    showFeedback(res.ok ? ('Sent: ' + item.name) : res.text, !res.ok, 'composeFeedback');
+  } else {
+    const r = await fetch('/api/draw', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ width: item.width, height: item.height, pixels: item.pixels.map(p => p || '') })
+    });
+    const text = await r.text();
+    showFeedback(r.ok ? ('Sent: ' + item.name) : text, !r.ok, 'drawFeedback');
+  }
+  setTimeout(refreshStatus, 300);
+}
+
+function renderSavedGrid() {
+  const items = getSavedItems();
+  const el = $('savedGrid');
+  if (items.length === 0) {
+    el.innerHTML = '<i>Nothing saved yet -- use the Save buttons above.</i>';
+    return;
+  }
+  el.innerHTML = '';
+  items.forEach((item, idx) => {
+    const row = document.createElement('div');
+    row.className = 'saved-item';
+
+    let thumbHtml;
+    if (item.type === 'drawing') {
+      thumbHtml = '<canvas class="saved-thumb" width="' + item.width + '" height="' + item.height + '"></canvas>';
+    } else {
+      thumbHtml = '<span class="saved-thumb" style="display:flex;align-items:center;justify-content:center;">'
+                + '<span style="width:8px;height:8px;border-radius:50%;background:' + item.hex + '"></span></span>';
+    }
+
+    row.innerHTML = thumbHtml
+      + '<span class="saved-name">' + item.name + (item.type === 'text' ? ' (' + item.style + ')' : ' (drawing)') + '</span>'
+      + '<span class="saved-actions">'
+      + '<button class="action" onclick="loadSavedItem(' + idx + ')">Load</button>'
+      + '<button class="action primary" onclick="sendSavedItem(' + idx + ')">Send</button>'
+      + '<button class="action danger" onclick="deleteSavedItem(' + idx + ')">Del</button>'
+      + '</span>';
+    el.appendChild(row);
+
+    if (item.type === 'drawing') {
+      const thumbCanvas = row.querySelector('canvas.saved-thumb');
+      redrawCanvas(thumbCanvas, item.pixels);
+    }
+  });
+}
+
 populateExamples();
 loadSlots();
 refreshStatus();
+initDrawCanvas();
+renderSavedGrid();
 setInterval(refreshStatus, 4000);
 </script>
 

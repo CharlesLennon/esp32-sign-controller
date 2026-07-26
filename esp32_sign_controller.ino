@@ -138,6 +138,8 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <esp_system.h>
+#include <vector>
+#include <CoolLeduxBle.h>
 #include "coolledx_fallback.h"
 #include "web_ui.h"
 
@@ -602,8 +604,17 @@ bool writeChunkReliable(const uint8_t* data, size_t len, const String& label) {
 //
 // (2026-07-26: this used to also support an SD-card content source
 // alongside flash, with its own JsonDocument/hex-decode plumbing -- removed
-// along with the rest of the SD card support. Flash is now the only source.)
-enum SendSource { SEND_NONE, SEND_FLASH };
+// along with the rest of the SD card support.)
+//
+// SEND_RAM added the same day for live-built content (the web UI's drawing
+// grid / text composer, see handleApiDraw()/handleApiCompose()): packets
+// built on-device via the CoolLeduxBle library at request time, held in a
+// heap-allocated vector rather than living in flash/PROGMEM like
+// FALLBACK_TABLE's entries. `ramPackets` is OWNED by pendingSend once set
+// (via trySendRamPackets()) -- cancelPendingSend() is the only place that
+// frees it, so every code path that clears/replaces pendingSend must go
+// through cancelPendingSend(), never reset the struct by hand.
+enum SendSource { SEND_NONE, SEND_FLASH, SEND_RAM };
 
 struct PendingSend {
   bool active = false;
@@ -614,12 +625,17 @@ struct PendingSend {
   size_t totalChunks = 0;
   unsigned long nextChunkAtMs = 0;
   const MessageEntry* flashEntry = nullptr;
+  std::vector<std::vector<uint8_t>>* ramPackets = nullptr;
 };
 
 PendingSend pendingSend;
 uint32_t sendGeneration = 0;
 
 void cancelPendingSend() {
+  if (pendingSend.ramPackets != nullptr) {
+    delete pendingSend.ramPackets;
+    pendingSend.ramPackets = nullptr;
+  }
   pendingSend.active = false;
   pendingSend.source = SEND_NONE;
   pendingSend.chunkIndex = 0;
@@ -634,6 +650,42 @@ bool beginSendFlash(const MessageEntry& entry) {
   }
   logLine("[SEND] " + String(entry.code) + " (flash fallback) queued, " + String(entry.num_chunks) +
           " chunk(s), MTU=" + String(pClient->getMTU()));
+  return true;
+}
+
+// Queues an already-built packet list (from CoolLeduxBle, e.g.
+// buildTiledStaticTextMessagePackets()/buildDrawingMessagePackets() --
+// see handleApiCompose()/handleApiDraw()) for non-blocking send, same
+// mechanism as trySendCode()'s flash path. `packets` must be heap-allocated
+// (`new std::vector<std::vector<uint8_t>>(...)`) -- ownership transfers to
+// pendingSend on success (freed by cancelPendingSend() once the send
+// finishes/is replaced/aborts); on failure (not connected) this function
+// frees it itself, so the caller never needs to clean up either way.
+bool trySendRamPackets(const char* code, const char* label, std::vector<std::vector<uint8_t>>* packets) {
+  if (!isConnected || pChar == nullptr) {
+    logLine(String("[SEND] ") + code + " (live) skipped -- not connected");
+    delete packets;
+    return false;
+  }
+
+  cancelPendingSend(); // safe to replace now -- the new content is ready
+  pendingSend.source = SEND_RAM;
+  pendingSend.ramPackets = packets;
+  pendingSend.totalChunks = packets->size();
+  pendingSend.chunkIndex = 0;
+  pendingSend.active = true;
+  sendGeneration++;
+  pendingSend.generation = sendGeneration;
+  pendingSend.nextChunkAtMs = millis();
+  strncpy(pendingSend.code, code, sizeof(pendingSend.code) - 1);
+  pendingSend.code[sizeof(pendingSend.code) - 1] = '\0';
+
+  strncpy(lastSentLabel, label ? label : code, sizeof(lastSentLabel) - 1);
+  lastSentLabel[sizeof(lastSentLabel) - 1] = '\0';
+  strncpy(lastSentCode, code, sizeof(lastSentCode) - 1);
+  lastSentCode[sizeof(lastSentCode) - 1] = '\0';
+
+  logLine(String("[SEND] ") + code + " (live, built on-device) queued, " + String(packets->size()) + " chunk(s)");
   return true;
 }
 
@@ -655,8 +707,16 @@ void pumpMessageSend() {
   }
 
   size_t i = pendingSend.chunkIndex;
-  const uint8_t* data = pendingSend.flashEntry->chunks[i];
-  size_t len = pendingSend.flashEntry->lengths[i];
+  const uint8_t* data;
+  size_t len;
+  if (pendingSend.source == SEND_RAM) {
+    const std::vector<uint8_t>& chunk = (*pendingSend.ramPackets)[i];
+    data = chunk.data();
+    len = chunk.size();
+  } else {
+    data = pendingSend.flashEntry->chunks[i];
+    len = pendingSend.flashEntry->lengths[i];
+  }
 
   logPart("[SEND]   " + String(pendingSend.code) + " chunk " + String(i) + "/" + String(pendingSend.totalChunks - 1) +
           ", " + String(len) + "B, data=");
@@ -931,6 +991,94 @@ void handleApiSend() {
   }
 }
 
+// 2026-07-26: live text composer -- builds a real CoolLEDUX message ON THE
+// DEVICE, right now, from a typed string/color/style, using the
+// CoolLeduxBle library (a C++ port of a subset of the coolledux-ble Python
+// library this whole project's protocol logic already comes from). No
+// pre-baking/reflashing needed for one-off custom messages, unlike
+// everything in FALLBACK_TABLE. Routes through trySendRamPackets() -- same
+// non-blocking send pipeline as flash-baked content, so this is just as
+// interruptible by a follow-up send.
+void handleApiCompose() {
+  if (!server.hasArg("text") || !server.hasArg("hex")) {
+    server.send(400, "text/plain", "missing 'text' or 'hex' param");
+    return;
+  }
+  String text = server.arg("text");
+  String hex = server.arg("hex");
+  if (!hex.startsWith("#")) hex = "#" + hex;
+  String style = server.hasArg("style") ? server.arg("style") : "static";
+  bool smallFont = server.hasArg("small") && server.arg("small") == "1";
+
+  logLine("[WEB] /api/compose text='" + text + "' color=" + hex + " style=" + style +
+          " small=" + String(smallFont));
+
+  auto* packets = new std::vector<std::vector<uint8_t>>();
+  if (style == "scroll") {
+    *packets = CoolLedux::buildTiledScrollingTextMessagePackets(
+        text.c_str(), hex.c_str(), -1, -1, 8, 6, 50, 0, 1, 1, smallFont);
+  } else {
+    *packets = CoolLedux::buildTiledStaticTextMessagePackets(
+        text.c_str(), hex.c_str(), -1, -1, 8, 0, 1, 1, smallFont);
+  }
+
+  bool sent = trySendRamPackets("LIVE_TEXT", ("Composed: " + text).c_str(), packets);
+  if (sent) {
+    server.send(200, "application/json", "{\"ok\":true,\"packets\":" + String(pendingSend.totalChunks) + "}");
+  } else {
+    server.send(409, "text/plain", "not connected -- tap 'Connect to Sign' first");
+  }
+}
+
+// 2026-07-26: live drawing canvas -- takes a pixel grid drawn in the web
+// UI's browser-side canvas (JSON: {"width":W,"height":H,"pixels":["RRGGBB"
+// or "" per cell, row-major (y*width+x)]}) and builds+sends the real
+// tiled-Animation packets on-device via CoolLeduxBle's
+// buildDrawingMessagePackets(). Same non-blocking send pipeline as
+// everything else.
+void handleApiDraw() {
+  String body = server.arg("plain");
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, body);
+  if (err) {
+    server.send(400, "text/plain", String("invalid JSON: ") + err.c_str());
+    return;
+  }
+
+  int width = doc["width"] | CoolLedux::SIGN_WIDTH;
+  int height = doc["height"] | CoolLedux::SIGN_HEIGHT;
+  JsonArrayConst pixels = doc["pixels"];
+  if (pixels.isNull() || (int)pixels.size() != width * height) {
+    server.send(400, "text/plain", "'pixels' array missing or wrong length for width*height");
+    return;
+  }
+
+  std::vector<uint32_t> packed(width * height);
+  size_t idx = 0;
+  for (JsonVariantConst v : pixels) {
+    const char* s = v.as<const char*>();
+    if (s == nullptr || s[0] == '\0') {
+      packed[idx] = CoolLedux::DRAWING_BACKGROUND;
+    } else {
+      const char* hexStr = (s[0] == '#') ? s + 1 : s;
+      packed[idx] = (uint32_t)strtoul(hexStr, nullptr, 16) & 0x00FFFFFF;
+    }
+    idx++;
+  }
+
+  logLine("[WEB] /api/draw " + String(width) + "x" + String(height) + " grid");
+
+  auto* packets = new std::vector<std::vector<uint8_t>>(
+      CoolLedux::buildDrawingMessagePackets(packed.data(), width, height));
+
+  bool sent = trySendRamPackets("LIVE_DRAWING", "Custom drawing", packets);
+  if (sent) {
+    server.send(200, "application/json", "{\"ok\":true,\"packets\":" + String(pendingSend.totalChunks) + "}");
+  } else {
+    server.send(409, "text/plain", "not connected -- tap 'Connect to Sign' first");
+  }
+}
+
 void handleApiPower() {
   bool on = server.arg("on") == "1";
   logLine("[WEB] /api/power on=" + String(on));
@@ -1086,6 +1234,8 @@ void setupWebServer() {
   server.on("/api/slots", HTTP_GET, handleApiSlots);
   server.on("/api/connectble", HTTP_POST, handleApiConnectBle);
   server.on("/api/send", HTTP_POST, handleApiSend);
+  server.on("/api/compose", HTTP_POST, handleApiCompose);
+  server.on("/api/draw", HTTP_POST, handleApiDraw);
   server.on("/api/power", HTTP_POST, handleApiPower);
   server.on("/api/brightness", HTTP_POST, handleApiBrightness);
   server.on("/api/mirror", HTTP_POST, handleApiMirror);
@@ -1158,6 +1308,72 @@ void handleSerialInput() {
     Serial.println();
     bool ok = writeChunkReliable(rawBuf, len, "RAWHEX");
     logLine(String("[RAW] ") + (ok ? "ok" : "FAILED"));
+    return;
+  }
+
+  // BLEON -- Serial-only shortcut for enableBLE(), which is otherwise only
+  // reachable via the web UI's "Connect to Sign" button (POST /api/connectble).
+  // Useful for testing from a machine with no WiFi adapter to join the
+  // ESP32's own AP with (this dev machine, notably).
+  if (line.equalsIgnoreCase("BLEON")) {
+    enableBLE();
+    return;
+  }
+
+  // TESTCOMPOSE:<text>|<hex>|<style>|<small> -- exercises the exact same
+  // CoolLeduxBle call + trySendRamPackets() path as /api/compose, without
+  // needing an HTTP client on the ESP32's WiFi AP. E.g.:
+  //   TESTCOMPOSE:HELLO|#00FF00|static|0
+  if (line.startsWith("TESTCOMPOSE:")) {
+    String rest = line.substring(12);
+    int p1 = rest.indexOf('|');
+    int p2 = rest.indexOf('|', p1 + 1);
+    int p3 = rest.indexOf('|', p2 + 1);
+    if (p1 < 0 || p2 < 0 || p3 < 0) {
+      logLine("[TEST] usage: TESTCOMPOSE:<text>|<hex>|<style>|<small 0/1>");
+      return;
+    }
+    String text = rest.substring(0, p1);
+    String hex = rest.substring(p1 + 1, p2);
+    String style = rest.substring(p2 + 1, p3);
+    bool smallFont = rest.substring(p3 + 1) == "1";
+    if (!hex.startsWith("#")) hex = "#" + hex;
+
+    logLine("[TEST] TESTCOMPOSE text='" + text + "' color=" + hex + " style=" + style +
+            " small=" + String(smallFont));
+    auto* packets = new std::vector<std::vector<uint8_t>>();
+    if (style == "scroll") {
+      *packets = CoolLedux::buildTiledScrollingTextMessagePackets(
+          text.c_str(), hex.c_str(), -1, -1, 8, 6, 50, 0, 1, 1, smallFont);
+    } else {
+      *packets = CoolLedux::buildTiledStaticTextMessagePackets(
+          text.c_str(), hex.c_str(), -1, -1, 8, 0, 1, 1, smallFont);
+    }
+    bool sent = trySendRamPackets("LIVE_TEXT", ("Composed: " + text).c_str(), packets);
+    logLine(String("[TEST] ") + (sent ? "sent" : "FAILED (not connected)"));
+    return;
+  }
+
+  // TESTDRAW -- exercises CoolLedux::buildDrawingMessagePackets() +
+  // trySendRamPackets() with a hardcoded diagonal red/green/blue stripe
+  // pattern across the full 64x16 canvas, same code path as /api/draw's
+  // JSON-driven pixel grid, for a from-Serial hardware check with no WiFi
+  // client available.
+  if (line.equalsIgnoreCase("TESTDRAW")) {
+    logLine("[TEST] TESTDRAW: building a 64x16 diagonal stripe pattern");
+    const int w = CoolLedux::SIGN_WIDTH, h = CoolLedux::SIGN_HEIGHT;
+    std::vector<uint32_t> packed((size_t)w * h);
+    for (int y = 0; y < h; y++) {
+      for (int x = 0; x < w; x++) {
+        int band = ((x + y) / 4) % 3;
+        uint32_t color = (band == 0) ? 0xFF0000u : (band == 1) ? 0x00FF00u : 0x0000FFu;
+        packed[(size_t)y * w + x] = color;
+      }
+    }
+    auto* packets = new std::vector<std::vector<uint8_t>>(
+        CoolLedux::buildDrawingMessagePackets(packed.data(), w, h));
+    bool sent = trySendRamPackets("LIVE_DRAWING", "Test stripes", packets);
+    logLine(String("[TEST] ") + (sent ? "sent" : "FAILED (not connected)"));
     return;
   }
 
